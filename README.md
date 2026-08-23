@@ -71,4 +71,5 @@ packer build -var-file=dev.pkrvars.hcl .
 - `scripts/lib/timing-monitor.sh`: bootstrap timing monitor installation
 - `cloud-init/managed-minimal.yaml`: managed node bootstrap
 - `cloud-init/self-managed-minimal.yaml`: self-managed node bootstrap
+- `docs/how-this-actually-works.md`: fast orientation for a fresh session
 - `docs/startup-optimization-plan.md`: current fast-start status and repo boundaries
