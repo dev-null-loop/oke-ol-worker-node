@@ -2,6 +2,30 @@
 
 Build an OCI custom image for OKE Ubuntu worker nodes with Packer.
 
+The image is referenced at runtime from `private-oke-karpenter` through `OCINodeClass.imageId`.
+
+## Inputs
+
+Set local values in `packer/dev.pkrvars.hcl`:
+
+Required:
+
+- `availability_domain`
+- `compartment_ocid`
+- `subnet_ocid`
+- `base_image_ocid`
+- `oke_repo_par`
+- `k8s_version`
+- `oke_default_prepull_images`
+
+Optional:
+
+- `additional_prepull_images`
+- `ssh_private_key_file`
+- `ssh_public_key_file`
+
+Defaults live in `packer/variables.pkr.hcl`.
+
 ## Build
 
 Create a local var file first:
@@ -29,36 +53,93 @@ packer init .
 packer build -var-file=dev.pkrvars.hcl .
 ```
 
-## Defaults
+## Build Flow
+
+Entrypoint:
+
+- `packer/image.pkr.hcl`
+
+Provisioning steps:
+
+1. wait for `cloud-init`
+2. upload `scripts/lib` to the build instance
+3. run `scripts/install-oke-node-packages.sh`
+
+## Optimization Steps
+
+1. configure the OKE apt source during the image build
+2. install `oci-oke-node-all-<k8s_version>` during the image build
+3. remove `unattended-upgrades`
+4. install `jq`, `curl`, and `crictl`
+5. pre-create OCI CNI host directories
+6. mask wait-online services
+7. enable the CRI service at boot
+8. pre-pull the configured image set
+9. pre-seed OCI CNI host assets when the OCI CNI image is included
+10. install the bootstrap timing monitor
+11. sanitize guest state before image capture
+
+## Defaults and Built Image Contents
 
 - Ubuntu Noble (`24.04`)
 - shape defaults to `VM.Standard.E5.Flex` with `1` OCPU and `12` GB RAM
 - image metadata tags for `k8s_version`, base image, package, and profile
 - helper packages baked in: `jq`, `curl`, `crictl`
-- default OKE hot-path image pre-pull enabled
 - CRI runtime enabled for earlier boot-time startup
 - CNI host paths pre-created in the image
 - bootstrap timing monitor enabled
 - apt source URL is derived from `ubuntu_release`, `k8s_version`, and `oke_repo_par`
 - OKE package name is derived as `oci-oke-node-all-<k8s_version>`
 - image name is `ubuntu-<ubuntu_release>-YYYY.MM.DD-OKE-<k8s_version>-<optimization_profile>`
+- `unattended-upgrades` removed
+- wait-online services masked
+- guest state sanitized before capture
 
-## Fast Start
+## Pre-pull Images
 
-- Define the built-in OKE pre-pull set through `oke_default_prepull_images`.
-- Treat `oke_default_prepull_images` as version-specific data in the `.pkrvars` file, not as a stable forever-list.
-- Refresh that list from a fresh-node pull observation whenever `k8s_version` changes or OKE changes the first-node image set.
-- Typical entries are:
-  - `oke-public-vcn-native-ip-cni-plugin`
-  - `oke-public-cloud-provider-oci`
-  - `oke-public-proxymux-cli`
-  - digest-pinned refs such as `kube-proxy` or `pause` when needed
-- Recommended additional pre-pull for the current KPO startup-taint workaround:
-  - `public.ecr.aws/z2c7x8q5/bitnami/kubectl@sha256:78726c39c86a468752790cd392839cef1282095400bb3cdf3619ab5dae9c8d2c`
-- Add any extra first-pod-path images through `additional_prepull_images`.
-- Timing lands in `/var/log/oke-optimized-bootstrap-timing.log`.
-- The repo can optimize image contents and image-time pulls. It cannot by itself remove Karpenter-side orchestration delays such as external startup-taint helpers.
-- The tracked example file is `packer/dev.pkrvars.hcl.example`. Keep your real `dev.pkrvars.hcl` local.
+- `oke_default_prepull_images` contains the standard image set for the selected OKE/Kubernetes version
+- update that list when `k8s_version` changes or the first-boot pull set changes
+- typical entries include `oke-public-vcn-native-ip-cni-plugin`, `oke-public-cloud-provider-oci`, `oke-public-proxymux-cli`, and digest-pinned refs such as `kube-proxy`
+- `additional_prepull_images` is for extra images outside the standard set
+- timing lands in `/var/log/oke-optimized-bootstrap-timing.log`
+- keep the real `packer/dev.pkrvars.hcl` local; use `packer/dev.pkrvars.hcl.example` as the tracked example
+
+## Script Roles
+
+- `scripts/install-oke-node-packages.sh`
+  - validates the Ubuntu base image
+  - configures the OKE apt repository
+  - installs the OKE node package
+  - enables the runtime
+  - invokes helper modules
+
+- `scripts/lib/common.sh`
+  - apt lock handling
+  - wait-online masking
+  - guest cleanup before image capture
+
+- `scripts/lib/prepull.sh`
+  - runtime startup for pre-pull
+  - image pre-pull
+  - OCI CNI host asset seeding
+
+- `scripts/lib/timing-monitor.sh`
+  - timing monitor installation
+
+## Scope
+
+This repo covers:
+
+- image contents
+- image-time package installation
+- image-time pulls
+- guest bootstrap measurement
+
+This repo does not cover:
+
+- OCI instance launch time
+- Karpenter/KPO orchestration delay before launch
+- OCI native pod networking convergence after node registration
 
 ## Files
 
@@ -71,5 +152,3 @@ packer build -var-file=dev.pkrvars.hcl .
 - `scripts/lib/timing-monitor.sh`: bootstrap timing monitor installation
 - `cloud-init/managed-minimal.yaml`: managed node bootstrap
 - `cloud-init/self-managed-minimal.yaml`: self-managed node bootstrap
-- `docs/how-this-actually-works.md`: fast orientation for a fresh session
-- `docs/startup-optimization-plan.md`: current fast-start status and repo boundaries
