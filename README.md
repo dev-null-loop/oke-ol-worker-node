@@ -1,6 +1,6 @@
-# oke-ubuntu-worker-node
+# oke-ol-worker-node
 
-Build an OCI custom image for OKE Ubuntu worker nodes with Packer.
+Build an OCI custom image for OKE Oracle Linux 8 worker nodes with Packer.
 
 The image is referenced at runtime from `private-oke-karpenter` through `OCINodeClass.imageId`.
 
@@ -14,7 +14,6 @@ Required:
 - `compartment_ocid`
 - `subnet_ocid`
 - `base_image_ocid`
-- `oke_repo_par`
 - `k8s_version`
 - `oke_default_prepull_images`
 
@@ -40,7 +39,6 @@ Set at least:
 - `compartment_ocid`
 - `subnet_ocid`
 - `base_image_ocid`
-- `oke_repo_par`
 - `k8s_version`
 
 For the fast-start path, also set:
@@ -67,31 +65,44 @@ Provisioning steps:
 
 ## Optimization Steps
 
-1. configure the OKE apt source during the image build
-2. install `oci-oke-node-all-<k8s_version>` during the image build
-3. remove `unattended-upgrades`
-4. install `jq`, `curl`, and `crictl`
-5. pre-create OCI CNI host directories
-6. mask wait-online services
-7. enable the CRI service at boot
-8. pre-pull the configured image set
-9. pre-seed OCI CNI host assets when the OCI CNI image is included
-10. install the bootstrap timing monitor
-11. sanitize guest state before image capture
+1. start from an official OKE Oracle Linux 8 worker image
+2. install `jq`, `curl`, and `crictl`
+3. pre-create OCI CNI host directories
+4. mask wait-online services
+5. enable the CRI service at boot
+6. pre-pull the configured image set
+7. pre-seed OCI CNI host assets when the OCI CNI image is included
+8. install the bootstrap timing monitor
+9. sanitize guest state before image capture
+
+## Implemented Optimizations
+
+1. use the official OKE Oracle Linux 8 worker image as the base
+2. bake in bootstrap helper tools: `jq`, `curl`, `crictl`
+3. pre-create OCI CNI host paths:
+   - `/opt/cni/bin`
+   - `/etc/cni/net.d`
+   - `/etc/oci-cni`
+4. mask `wait-online` services to avoid unnecessary boot blocking
+5. enable the CRI runtime and `oke.service` for earlier boot-time startup
+6. pre-pull the standard first-boot OKE image set into the image
+7. pre-seed OCI CNI host assets from the OCI CNI image:
+   - CNI binaries
+   - OCI CNI config
+   - supporting iptables assets
+8. install a bootstrap timing monitor that writes `/var/log/oke-optimized-bootstrap-timing.log`
+9. sanitize guest state before image capture
 
 ## Defaults and Built Image Contents
 
-- Ubuntu Noble (`24.04`)
+- Oracle Linux 8 OKE image
 - shape defaults to `VM.Standard.E5.Flex` with `1` OCPU and `12` GB RAM
-- image metadata tags for `k8s_version`, base image, package, and profile
+- image metadata tags for `k8s_version`, base image, and profile
 - helper packages baked in: `jq`, `curl`, `crictl`
 - CRI runtime enabled for earlier boot-time startup
 - CNI host paths pre-created in the image
 - bootstrap timing monitor enabled
-- apt source URL is derived from `ubuntu_release`, `k8s_version`, and `oke_repo_par`
-- OKE package name is derived as `oci-oke-node-all-<k8s_version>`
-- image name is `ubuntu-<ubuntu_release>-YYYY.MM.DD-OKE-<k8s_version>-<optimization_profile>`
-- `unattended-upgrades` removed
+- image name is `ol8-YYYY.MM.DD-OKE-<k8s_version>-<optimization_profile>`
 - wait-online services masked
 - guest state sanitized before capture
 
@@ -107,9 +118,8 @@ Provisioning steps:
 ## Script Roles
 
 - `scripts/install-oke-node-packages.sh`
-  - validates the Ubuntu base image
-  - configures the OKE apt repository
-  - installs the OKE node package
+  - validates the Oracle Linux 8 base image
+  - refreshes package metadata
   - enables the runtime
   - invokes helper modules
 
@@ -131,7 +141,7 @@ Provisioning steps:
 This repo covers:
 
 - image contents
-- image-time package installation
+- image-time package installation for helper tooling
 - image-time pulls
 - guest bootstrap measurement
 

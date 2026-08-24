@@ -1,11 +1,7 @@
-# Required environment values
 availability_domain                                 = "RiYU:EU-FRANKFURT-1-AD-1"
 compartment_ocid                                    = "ocid1.compartment.oc1..replace"
 subnet_ocid                                         = "ocid1.subnet.oc1..replace"
-base_image_ocid                                     = "ocid1.image.oc1.eu-frankfurt-1.<official-ubuntu-24-04-image-ocid>"
-oke_repo_par                                        = "<PAR>"
-
-# Required release value
+base_image_ocid                                     = "ocid1.image.oc1.eu-frankfurt-1.<official-oke-ol8-image-ocid>"
 k8s_version                                         = "1.36.1"
 
 # Version-specific fast-start image set. Refresh this from a fresh-node pull

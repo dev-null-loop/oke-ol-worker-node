@@ -1,19 +1,5 @@
 #!/usr/bin/env bash
 
-readonly apt_lock_files=(
-  /var/lib/dpkg/lock-frontend
-  /var/lib/dpkg/lock
-  /var/lib/apt/lists/lock
-  /var/cache/apt/archives/lock
-)
-readonly apt_background_units=(
-  apt-daily.service
-  apt-daily-upgrade.service
-)
-readonly apt_background_timers=(
-  apt-daily.timer
-  apt-daily-upgrade.timer
-)
 readonly wait_online_units=(
   systemd-networkd-wait-online.service
   NetworkManager-wait-online.service
@@ -23,28 +9,130 @@ readonly cni_host_directories=(
   /etc/cni/net.d
   /etc/oci-cni
 )
+readonly removable_boot_kernel_args=(
+  netroot=iscsi
+  rd.iscsi.firmware=1
+  rd.iscsi.param=node.session.timeo.replacement_timeout=6000
+  libiscsi.debug_libiscsi_eh=1
+  rd.net.timeout.carrier=5
+  rd.net.timeout.dhcp=10
+)
+readonly nonessential_boot_units=(
+  kdump.service
+  pmcd.service
+  pmie.service
+  pmlogger.service
+  unified-monitoring-agent.service
+  unified-monitoring-agent_config_downloader.service
+  unified-monitoring-agent_restarter.path
+  unified-monitoring-agent_config_downloader.timer
+)
+readonly node_doctor_root="/usr/lib/oke-node-doctor"
+readonly node_doctor_script="/usr/bin/node-doctor.sh"
+readonly node_doctor_venv="${node_doctor_root}/venv"
 
-stop_apt_background_jobs() {
-  sudo systemctl stop "${apt_background_units[@]}" 2>/dev/null || true
-  sudo systemctl stop "${apt_background_timers[@]}" 2>/dev/null || true
+refresh_dnf_metadata() {
+  sudo dnf makecache --refresh -y
 }
 
-wait_for_apt_locks() {
-  local waited=0
-  local max_wait=600
+optimize_grub_cmdline_for_local_boot() {
+  if ! command -v grubby >/dev/null 2>&1; then
+    echo "grubby not found; skipping kernel cmdline optimization." >&2
+    return 0
+  fi
 
-  while sudo fuser "${apt_lock_files[@]}" >/dev/null 2>&1; do
-    if (( waited == 0 || waited % 30 == 0 )); then
-      echo "Waiting for apt/dpkg locks to clear (${waited}s elapsed)..."
-      sudo fuser -v "${apt_lock_files[@]}" 2>/dev/null || true
+  local remove_args
+  remove_args="$(IFS=' '; echo "${removable_boot_kernel_args[*]}")"
+  if [[ -n "$remove_args" ]]; then
+    echo "Removing unneeded network/iSCSI boot args: ${remove_args}"
+    sudo grubby --update-kernel=ALL --remove-args="$remove_args" || true
+  fi
+}
+
+disable_nonessential_boot_services() {
+  local unit
+  for unit in "${nonessential_boot_units[@]}"; do
+    if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q "^$unit"; then
+      echo "Disabling ${unit} to reduce worker boot overhead"
+      sudo systemctl disable --now "$unit" 2>/dev/null || true
+      sudo systemctl mask "$unit" 2>/dev/null || true
     fi
-    if (( waited >= max_wait )); then
-      echo "Timed out waiting for apt/dpkg locks to clear" >&2
+  done
+}
+
+prepare_node_doctor_runtime() {
+  if [[ ! -f "${node_doctor_root}/requirements-vendored.txt" || ! -f "${node_doctor_script}" ]]; then
+    echo "Node doctor artifacts not present; skipping node doctor pre-bake."
+    return 0
+  fi
+
+  if [[ -x "${node_doctor_venv}/bin/python" ]]; then
+    echo "Node doctor virtualenv already present."
+  else
+    echo "Pre-baking node doctor virtualenv."
+    sudo rm -rf "${node_doctor_venv}"
+    local workdir
+    workdir="$(mktemp -d)"
+    trap 'sudo rm -rf "${workdir}"' RETURN
+
+    if ! sudo cp -R "${node_doctor_root}/." "${workdir}/"; then
+      echo "Unable to stage node doctor sources." >&2
       return 1
     fi
-    sleep 5
-    waited=$((waited + 5))
-  done
+
+    if ! sudo python3 -m venv --copies "${workdir}/venv"; then
+      echo "Unable to create node doctor virtualenv." >&2
+      return 1
+    fi
+
+    if sudo "${workdir}/venv/bin/python" -c "import sys; raise SystemExit(0 if (3, 7) <= sys.version_info < (3, 12) else 1)"; then
+      if ! sudo "${workdir}/venv/bin/python" -m pip install -q \
+        "${workdir}/vendor/pip-22.3.1-whl/pip-22.3.1-py3-none-any.whl" \
+        --ignore-installed \
+        --disable-pip-version-check; then
+        echo "Unable to install bundled pip for node doctor." >&2
+        return 1
+      fi
+    fi
+
+    if ! sudo bash -lc "cd '${workdir}' && '${workdir}/venv/bin/python' -m pip install -q \
+      -r ./requirements-vendored.txt \
+      --ignore-installed \
+      --disable-pip-version-check \
+      --no-index \
+      --find-links=./vendor/python-dependencies"; then
+      echo "Unable to pre-install node doctor dependencies." >&2
+      return 1
+    fi
+
+    if ! sudo mv "${workdir}/venv" "${node_doctor_venv}"; then
+      echo "Unable to move prebaked node doctor virtualenv into place." >&2
+      return 1
+    fi
+  fi
+
+  echo "Patching node doctor launcher to reuse prebaked virtualenv."
+  sudo tee "${node_doctor_script}" >/dev/null <<EOF
+#!/usr/bin/bash
+set -euo pipefail
+
+readonly LOCATION="${node_doctor_root}"
+readonly VENV="${node_doctor_venv}"
+
+if [[ \$EUID -ne 0 ]]; then
+  echo "WARNING: Node doctor can be only run as root user"
+  exit 1
+fi
+
+if [[ ! -x "\${VENV}/bin/python" ]]; then
+  echo "ERROR: Node doctor virtual environment is missing at \${VENV}" >&2
+  exit 1
+fi
+
+cd "\${LOCATION}"
+exec "\${VENV}/bin/python" -m scripts.main "\$@"
+EOF
+  sudo chmod 0755 "${node_doctor_script}"
 }
 
 prepare_cni_host_paths() {
@@ -67,11 +155,8 @@ disable_wait_online_services() {
 sanitize_guest_state() {
   echo "Sanitizing guest state before image capture..."
 
-  stop_apt_background_jobs
-  wait_for_apt_locks
-
-  sudo apt-get clean
-  sudo rm -rf /var/lib/apt/lists/*
+  sudo dnf clean all || true
+  sudo rm -rf /var/cache/dnf
   sudo rm -rf /tmp/* /var/tmp/*
 
   # Reset cloud-init instance state so cloned nodes re-run first-boot logic.

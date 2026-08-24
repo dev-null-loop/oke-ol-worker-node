@@ -237,7 +237,7 @@ install_helper_packages_if_needed() {
   local pkg
   for pkg in "${helper_packages[@]}"; do
     [[ -n "$pkg" ]] || continue
-    if ! dpkg-query -W -f='${Status}\n' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+    if ! rpm -q "$pkg" >/dev/null 2>&1; then
       missing_packages+=("$pkg")
     fi
   done
@@ -248,8 +248,7 @@ install_helper_packages_if_needed() {
   fi
 
   echo "Installing missing helper packages: ${missing_packages[*]}"
-  wait_for_apt_locks
-  sudo apt-get install -y --no-upgrade "${missing_packages[@]}"
+  sudo dnf install -y "${missing_packages[@]}"
 }
 
 install_prepull_runtime_dependencies() {
@@ -267,6 +266,5 @@ install_prepull_runtime_dependencies() {
   fi
 
   echo "Installing missing pre-pull runtime dependencies: ${runtime_dependencies[*]}"
-  wait_for_apt_locks
-  sudo apt-get install -y --no-upgrade "${runtime_dependencies[@]}"
+  sudo dnf install -y "${runtime_dependencies[@]}"
 }

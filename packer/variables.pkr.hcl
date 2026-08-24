@@ -15,12 +15,7 @@ variable "subnet_ocid" {
 
 variable "base_image_ocid" {
   type        = string
-  description = "Source Ubuntu image OCID used as the build base."
-}
-
-variable "oke_repo_par" {
-  type        = string
-  description = "PAR token used to construct the Ubuntu OKE package repository URL."
+  description = "Source Oracle Linux 8 OKE image OCID used as the build base."
 }
 
 variable "k8s_version" {
@@ -30,17 +25,6 @@ variable "k8s_version" {
   validation {
     condition     = can(regex("^1\\.[0-9]+\\.[0-9]+$", var.k8s_version))
     error_message = "Kubernetes version must look like 1.xx.yy."
-  }
-}
-
-variable "ubuntu_release" {
-  type        = string
-  default     = "24.04"
-  description = "Ubuntu release for naming and OKE package repository selection."
-
-  validation {
-    condition     = contains(["22.04", "24.04"], var.ubuntu_release)
-    error_message = "Ubuntu release must be 22.04 or 24.04."
   }
 }
 
@@ -76,7 +60,7 @@ variable "ssh_private_key_file" {
 
 variable "ssh_username" {
   type        = string
-  default     = "ubuntu"
+  default     = "opc"
   description = "SSH username used to connect to the temporary build instance."
 }
 
@@ -101,7 +85,7 @@ variable "skip_create_image" {
 variable "oke_default_prepull_images" {
   type        = list(string)
   default     = []
-  description = "Version-specific baseline image set to pre-pull on every fast-start build."
+  description = "Version-specific baseline image set to pre-pull on every OL8 fast-start build."
 }
 
 variable "additional_prepull_images" {
