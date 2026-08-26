@@ -19,7 +19,23 @@ readonly prepull_runtime_dependencies=(
   crun
   podman
 )
+readonly removable_prepull_packages=(
+  podman
+)
 readonly cni_seed_image_pattern="oke-public-vcn-native-ip-cni-plugin"
+readonly cni_binary_source_candidates=(
+  /usr/bin
+  /bin
+)
+readonly cni_binary_target_directories=(
+  /opt/cni/bin
+  /usr/libexec/cni
+)
+readonly podman_noise_files=(
+  /etc/cni/net.d/87-podman-bridge.conflist
+  /etc/cni/net.d/100-crio-bridge.conf
+  /etc/cni/net.d/200-loopback.conf
+)
 
 find_prepull_image() {
   local pattern="$1"
@@ -103,6 +119,28 @@ configure_boot_cri_runtime() {
   sudo systemctl enable "$service_name" || true
 }
 
+cleanup_cni_config_noise() {
+  local file_name
+  for file_name in "${podman_noise_files[@]}"; do
+    sudo rm -f "$file_name"
+  done
+  sudo rm -f /etc/cni/net.d/99-dummy.conf
+}
+
+remove_prepull_runtime_artifacts() {
+  local service_name
+  for service_name in podman.service podman.socket podman-restart.service podman-clean-transient.service; do
+    if systemctl list-unit-files "$service_name" --no-legend 2>/dev/null | grep -q "^$service_name"; then
+      sudo systemctl disable --now "$service_name" 2>/dev/null || true
+      sudo systemctl mask "$service_name" 2>/dev/null || true
+    fi
+  done
+
+  if (( ${#removable_prepull_packages[@]} > 0 )); then
+    sudo dnf remove -y "${removable_prepull_packages[@]}" || true
+  fi
+}
+
 seed_oci_cni_assets_from_prepulled_image() {
   local runtime_endpoint="$1"
   local cni_image
@@ -139,10 +177,23 @@ seed_oci_cni_assets_from_prepulled_image() {
 
   local binary
   for binary in "${cni_binaries[@]}"; do
-    sudo podman cp "${container_id}:/bin/${binary}" "${temp_dir}/${binary}"
-    sudo install -m 0755 "${temp_dir}/${binary}" "/opt/cni/bin/${binary}-current"
-    sudo chmod 0755 "/opt/cni/bin/${binary}-current"
-    sudo ln -sfn "${binary}-current" "/opt/cni/bin/${binary}"
+    local copied=0
+    local source_dir
+    for source_dir in "${cni_binary_source_candidates[@]}"; do
+      if sudo podman cp "${container_id}:${source_dir}/${binary}" "${temp_dir}/${binary}" 2>/dev/null; then
+        copied=1
+        break
+      fi
+    done
+    if (( copied == 0 )); then
+      echo "Failed to locate ${binary} in ${cni_image}" >&2
+      return 1
+    fi
+    local target_dir
+    for target_dir in "${cni_binary_target_directories[@]}"; do
+      sudo install -m 0755 "${temp_dir}/${binary}" "${target_dir}/${binary}"
+      sudo chmod 0755 "${target_dir}/${binary}"
+    done
   done
 
   cat >"${temp_dir}/cni-conf.json" <<'EOF'
@@ -179,13 +230,16 @@ EOF
 
   sudo install -m 0644 "${temp_dir}/cni-conf.json" /etc/cni/net.d/10-oci.conflist
   sudo chmod 0644 /etc/cni/net.d/10-oci.conflist
-  sudo touch /etc/cni/net.d/99-dummy.conf
+  # A zero-byte CNI file triggers repeated parse errors from CRI-O on boot.
+  sudo rm -f /etc/cni/net.d/99-dummy.conf
 
+  local file_name
   for file_name in cni-conf.json iptables ip6tables; do
     sudo install -m 0644 "${temp_dir}/${file_name}" "/etc/oci-cni/${file_name}"
   done
   sudo chmod 0644 /etc/oci-cni/cni-conf.json
   sudo chmod 0755 /etc/oci-cni/iptables /etc/oci-cni/ip6tables
+  cleanup_cni_config_noise
 
   echo "OCI CNI host assets pre-seeded successfully."
 }
@@ -223,6 +277,8 @@ prepull_container_images() {
   if service_name="$(get_cri_service_name)"; then
     sudo systemctl stop "$service_name" || true
   fi
+
+  remove_prepull_runtime_artifacts
 }
 
 install_helper_packages_if_needed() {

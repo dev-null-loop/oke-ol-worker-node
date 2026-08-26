@@ -6,6 +6,7 @@ readonly wait_online_units=(
 )
 readonly cni_host_directories=(
   /opt/cni/bin
+  /usr/libexec/cni
   /etc/cni/net.d
   /etc/oci-cni
 )
@@ -18,10 +19,25 @@ readonly removable_boot_kernel_args=(
   rd.net.timeout.dhcp=10
 )
 readonly nonessential_boot_units=(
+  atd.service
   kdump.service
+  ksplice-prefetch.service
+  ksplice.service
+  libstoragemgmt.service
+  mcelog.service
+  mdmonitor.service
+  multipathd.service
+  nis-domainname.service
+  nfs_client_id.service
   pmcd.service
   pmie.service
-  pmlogger.service
+  rpcbind.service
+  smartd.service
+  sssd.service
+  sysstat.service
+  tuned.service
+  udisks2.service
+  vdo.service
   unified-monitoring-agent.service
   unified-monitoring-agent_config_downloader.service
   unified-monitoring-agent_restarter.path
@@ -30,6 +46,10 @@ readonly nonessential_boot_units=(
 readonly node_doctor_root="/usr/lib/oke-node-doctor"
 readonly node_doctor_script="/usr/bin/node-doctor.sh"
 readonly node_doctor_venv="${node_doctor_root}/venv"
+readonly cni_dummy_guard_script="/usr/local/bin/oke-cni-dummy-guard.sh"
+readonly cni_dummy_guard_service="/etc/systemd/system/oke-cni-dummy-guard.service"
+readonly cni_dummy_guard_path="/etc/systemd/system/oke-cni-dummy-guard.path"
+readonly cloud_init_optimization_cfg="/etc/cloud/cloud.cfg.d/98-oke-fast-start.cfg"
 
 refresh_dnf_metadata() {
   sudo dnf makecache --refresh -y
@@ -140,6 +160,54 @@ prepare_cni_host_paths() {
   sudo touch /run/xtables.lock
 }
 
+expand_root_filesystem_if_possible() {
+  if [[ -x /usr/libexec/oci-growfs ]]; then
+    echo "Expanding root filesystem during image build with oci-growfs"
+    sudo /usr/libexec/oci-growfs -y || true
+    return 0
+  fi
+
+  echo "No supported root filesystem grow helper found; leaving rootfs expansion to first boot."
+}
+
+install_cni_dummy_guard() {
+  sudo tee "${cni_dummy_guard_script}" >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+dummy_conf="/etc/cni/net.d/99-dummy.conf"
+
+if [[ -e "${dummy_conf}" ]] && [[ ! -s "${dummy_conf}" ]]; then
+  rm -f "${dummy_conf}"
+fi
+EOF
+  sudo chmod 0755 "${cni_dummy_guard_script}"
+
+  sudo tee "${cni_dummy_guard_service}" >/dev/null <<EOF
+[Unit]
+Description=Remove empty OKE dummy CNI config if recreated
+
+[Service]
+Type=oneshot
+ExecStart=${cni_dummy_guard_script}
+EOF
+
+  sudo tee "${cni_dummy_guard_path}" >/dev/null <<EOF
+[Unit]
+Description=Watch for empty OKE dummy CNI config recreation
+
+[Path]
+PathExists=/etc/cni/net.d/99-dummy.conf
+Unit=$(basename "${cni_dummy_guard_service}")
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo systemctl daemon-reload || true
+  sudo systemctl enable "${cni_dummy_guard_path}" || true
+}
+
 disable_wait_online_services() {
   local unit
 
@@ -150,6 +218,23 @@ disable_wait_online_services() {
       sudo systemctl mask "$unit" || true
     fi
   done
+}
+
+install_cloud_init_optimization_profile() {
+  sudo tee "${cloud_init_optimization_cfg}" >/dev/null <<'EOF'
+# Trim cloud-init work to the modules still needed for OKE worker bootstrap.
+# Keep runcmd/scripts-user because the managed and self-managed payloads use them.
+cloud_config_modules:
+  - mounts
+  - locale
+  - set-passwords
+  - yum-add-repo
+  - disable-ec2-metadata
+  - runcmd
+
+cloud_final_modules:
+  - scripts-user
+EOF
 }
 
 sanitize_guest_state() {

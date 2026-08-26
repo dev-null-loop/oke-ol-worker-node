@@ -1,7 +1,8 @@
 availability_domain                                 = "RiYU:EU-FRANKFURT-1-AD-1"
 compartment_ocid                                    = "ocid1.compartment.oc1..replace"
 subnet_ocid                                         = "ocid1.subnet.oc1..replace"
-base_image_ocid                                     = "ocid1.image.oc1.eu-frankfurt-1.<official-oke-ol8-image-ocid>"
+base_image_ocid                                     = "ocid1.image.oc1.eu-frankfurt-1.<official-oke-ol8-or-ol9-oke-image-ocid>"
+oracle_linux_major_version                          = 8
 k8s_version                                         = "1.36.1"
 
 # Version-specific fast-start image set. Refresh this from a fresh-node pull

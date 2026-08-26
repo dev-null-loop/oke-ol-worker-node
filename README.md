@@ -1,6 +1,6 @@
 # oke-ol-worker-node
 
-Build an OCI custom image for OKE Oracle Linux 8 worker nodes with Packer.
+Build an OCI custom image for OKE Oracle Linux 8 or Oracle Linux 9 worker nodes with Packer.
 
 The image is referenced at runtime from `private-oke-karpenter` through `OCINodeClass.imageId`.
 
@@ -14,6 +14,7 @@ Required:
 - `compartment_ocid`
 - `subnet_ocid`
 - `base_image_ocid`
+- `oracle_linux_major_version`
 - `k8s_version`
 - `oke_default_prepull_images`
 
@@ -39,6 +40,7 @@ Set at least:
 - `compartment_ocid`
 - `subnet_ocid`
 - `base_image_ocid`
+- `oracle_linux_major_version`
 - `k8s_version`
 
 For the fast-start path, also set:
@@ -65,44 +67,84 @@ Provisioning steps:
 
 ## Optimization Steps
 
-1. start from an official OKE Oracle Linux 8 worker image
+1. start from an official OKE Oracle Linux worker image that matches the requested major version
 2. install `jq`, `curl`, and `crictl`
 3. pre-create OCI CNI host directories
-4. mask wait-online services
-5. enable the CRI service at boot
-6. pre-pull the configured image set
-7. pre-seed OCI CNI host assets when the OCI CNI image is included
-8. install the bootstrap timing monitor
-9. sanitize guest state before image capture
+4. expand the root filesystem during image build when the helper is available
+5. mask wait-online services
+6. patch the known `oke` bootstrap binary to lower hardcoded exponential-backoff caps from `5s` to `1s`
+7. enable the CRI service at boot
+8. pre-pull the configured image set
+9. pre-seed OCI CNI host assets when the OCI CNI image is included
+10. remove podman and stray CNI configs after pre-seed
+11. install the bootstrap timing monitor
+12. sanitize guest state before image capture
 
 ## Implemented Optimizations
 
-1. use the official OKE Oracle Linux 8 worker image as the base
+1. use the official OKE Oracle Linux worker image as the base
 2. bake in bootstrap helper tools: `jq`, `curl`, `crictl`
 3. pre-create OCI CNI host paths:
    - `/opt/cni/bin`
+   - `/usr/libexec/cni`
    - `/etc/cni/net.d`
    - `/etc/oci-cni`
-4. mask `wait-online` services to avoid unnecessary boot blocking
-5. enable the CRI runtime and `oke.service` for earlier boot-time startup
-6. pre-pull the standard first-boot OKE image set into the image
-7. pre-seed OCI CNI host assets from the OCI CNI image:
+4. expand the root filesystem during image build with `/usr/libexec/oci-growfs` when present
+5. mask `wait-online` services to avoid unnecessary boot blocking
+6. patch the known August 25, 2026 `oke` bootstrap binary in-image by SHA-256 guard to reduce hardcoded backoff caps
+7. enable the CRI runtime and `oke.service` for earlier boot-time startup
+8. pre-pull the standard first-boot OKE image set into the image
+9. pre-seed OCI CNI host assets from the OCI CNI image:
    - CNI binaries
    - OCI CNI config
    - supporting iptables assets
-8. install a bootstrap timing monitor that writes `/var/log/oke-optimized-bootstrap-timing.log`
-9. sanitize guest state before image capture
+10. remove podman after pre-seed and delete stray CNI files such as `87-podman-bridge.conflist`, `100-crio-bridge.conf`, `200-loopback.conf`, and `99-dummy.conf`
+11. install a bootstrap timing monitor that writes `/var/log/oke-optimized-bootstrap-timing.log`
+12. sanitize guest state before image capture
+
+## Benchmark Findings
+
+- baseline 100-node VCN-native run with the earlier single `cni-ready-untaint` deployment stalled at `99/100` and reached that point at about `558s`
+- replacing the single untaint deployment with a per-node `DaemonSet` materially improved the tail
+- rerun with the per-node helper reached `99/100` at about `261s`
+- the remaining gap was not image boot or CNI image pull time
+- the last blocker was one launched instance that never registered as a Kubernetes node until it was patched manually
+
+## Registered-Node Failure Found
+
+One failed node from the 100-node rerun was inspected directly.
+
+Observed state on the broken node:
+
+- OCI instance was `RUNNING`
+- `crio` and `kubelet` were `active`
+- the node could reach `https://10.0.0.11:6443`
+- `/var/lib/kubelet/pki/kubelet-client-current.pem` was missing
+- kubelet registration and CSR submission were failing with `Unauthorized`
+
+Observed auth mismatch:
+
+- `/etc/kubernetes/bootstrap-kubelet.conf` on the node contained token `qorysq.korf64ruzp4heeew`
+- the live cluster secret `bootstrap-token-qorysq` contained token secret `uooab4bheyk91zpx`
+- there was no CSR in the cluster for `system:bootstrap:qorysq`
+- after replacing the on-node token with the live secret value and restarting `kubelet`, the node registered immediately
+
+Current conclusion:
+
+- the image and the `metadata.user_data` wrapper were not the source of this failure
+- the token mismatch appears after the node calls the OKE worker bootstrap endpoint and before kubelet successfully bootstraps
+- the remaining intermittent `99/100` issue is a bootstrap-token mismatch or stale bootstrap-config issue in the OKE/KPO control path, not a guest boot-time regression in this repo
 
 ## Defaults and Built Image Contents
 
-- Oracle Linux 8 OKE image
+- Oracle Linux 8 or Oracle Linux 9 OKE image
 - shape defaults to `VM.Standard.E5.Flex` with `1` OCPU and `12` GB RAM
 - image metadata tags for `k8s_version`, base image, and profile
 - helper packages baked in: `jq`, `curl`, `crictl`
 - CRI runtime enabled for earlier boot-time startup
 - CNI host paths pre-created in the image
 - bootstrap timing monitor enabled
-- image name is `ol8-YYYY.MM.DD-OKE-<k8s_version>-<optimization_profile>`
+- image name is `ol<major>-YYYY.MM.DD-OKE-<k8s_version>-<optimization_profile>`
 - wait-online services masked
 - guest state sanitized before capture
 
@@ -118,7 +160,7 @@ Provisioning steps:
 ## Script Roles
 
 - `scripts/install-oke-node-packages.sh`
-  - validates the Oracle Linux 8 base image
+  - validates the requested Oracle Linux base image major version
   - refreshes package metadata
   - enables the runtime
   - invokes helper modules
@@ -156,7 +198,7 @@ This repo does not cover:
 - `packer/image.pkr.hcl`: OCI Packer build
 - `packer/variables.pkr.hcl`: input variables
 - `packer/dev.pkrvars.hcl.example`: canonical fast-start example values
-- `scripts/install-oke-node-packages.sh`: installs OKE Ubuntu packages into the image
+- `scripts/install-oke-node-packages.sh`: installs OKE Oracle Linux worker packages into the image
 - `scripts/lib/common.sh`: apt locking, guest cleanup, and wait-online handling
 - `scripts/lib/prepull.sh`: CRI startup, image pre-pull, and OCI CNI asset seeding
 - `scripts/lib/timing-monitor.sh`: bootstrap timing monitor installation
