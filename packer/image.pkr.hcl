@@ -14,11 +14,11 @@ locals {
   } : {}
 }
 
-source "oracle-oci" "oke-ol8" {
+source "oracle-oci" "oke-ol" {
   availability_domain                                 = var.availability_domain
   base_image_ocid                                     = var.base_image_ocid
   compartment_ocid                                    = var.compartment_ocid
-  image_name                                          = "ol8-${formatdate("YYYY.MM.DD", timestamp())}-OKE-${var.k8s_version}-${var.optimization_profile}"
+  image_name                                          = "ol${var.oracle_linux_major_version}-${formatdate("YYYY.MM.DD", timestamp())}-OKE-${var.k8s_version}-${var.optimization_profile}"
   shape                                               = var.shape
   ssh_username                                        = var.ssh_username
   subnet_ocid                                         = var.subnet_ocid
@@ -30,7 +30,7 @@ source "oracle-oci" "oke-ol8" {
 
   tags = {
     k8s_version          = var.k8s_version
-    base_os              = "ol8"
+    base_os              = "ol${var.oracle_linux_major_version}"
     base_image_ocid      = var.base_image_ocid
     optimization_profile = var.optimization_profile
   }
@@ -42,7 +42,7 @@ source "oracle-oci" "oke-ol8" {
 }
 
 build {
-  sources = ["source.oracle-oci.oke-ol8"]
+  sources = ["source.oracle-oci.oke-ol"]
 
   provisioner "file" {
     source      = "../scripts/lib"
@@ -57,6 +57,7 @@ build {
 
   provisioner "shell" {
     environment_vars = [
+      "EXPECTED_OL_MAJOR_VERSION=${var.oracle_linux_major_version}",
       "PREPULL_IMAGES=${join(",", local.prepull_images_effective)}",
     ]
     script = "../scripts/install-oke-node-packages.sh"

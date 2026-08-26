@@ -15,7 +15,18 @@ variable "subnet_ocid" {
 
 variable "base_image_ocid" {
   type        = string
-  description = "Source Oracle Linux 8 OKE image OCID used as the build base."
+  description = "Source Oracle Linux OKE image OCID used as the build base."
+}
+
+variable "oracle_linux_major_version" {
+  type        = number
+  default     = 8
+  description = "Oracle Linux major version for the OKE base image. Supported values: 8, 9."
+
+  validation {
+    condition     = contains([8, 9], var.oracle_linux_major_version)
+    error_message = "Oracle Linux major version must be 8 or 9."
+  }
 }
 
 variable "k8s_version" {
@@ -85,7 +96,7 @@ variable "skip_create_image" {
 variable "oke_default_prepull_images" {
   type        = list(string)
   default     = []
-  description = "Version-specific baseline image set to pre-pull on every OL8 fast-start build."
+  description = "Version-specific baseline image set to pre-pull on every Oracle Linux fast-start build."
 }
 
 variable "additional_prepull_images" {
